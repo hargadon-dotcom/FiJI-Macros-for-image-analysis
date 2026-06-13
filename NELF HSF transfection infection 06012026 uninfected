@@ -1,0 +1,275 @@
+============================================================
+//  Process Channels + Nuclei Mask + C1 Intensity Measurement
+//
+//  For each open 2-channel image, this macro will:
+//
+//  -- Nuclei analysis --
+//    1. Split channels (C1, C2)
+//    2. Threshold C2 (nuclei channel) -> binary mask
+//    3. Run "Analyze Particles" to detect nuclei -> ROI Manager
+//    4. Save those ROIs as a .zip
+//    5. Measure Area + Mean C1 intensity within each nucleus
+//    6. Save per-image CSV (ROI, Area, Mean_C1)
+//    7. Append to a master CSV across all images
+//
+//  -- Channel/export processing --
+//    8. Apply LUTs + brightness/contrast per channel
+//       - C1 = Green, min 0 / max 25
+//       - C2 = Blue,  min 0 / max 120
+//    9. Save QC images: C1 and C2 (colored) with nuclei outlines overlaid
+//   10. Flatten + save each individual channel
+//   11. Merge C1+C2 -> save UNFLATTENED (editable, channels intact)
+//   12. Merge C1+C2 -> flatten -> save composite
+//       (also copied to a shared "All_Composites" folder)
+//
+//  Folder structure:
+//    [chosen directory]/
+//    └── [Batch folder]/
+//        ├── All_Measurements_Master.csv
+//        ├── All_Composites/
+//        │   ├── Snap-25_composite.tif
+//        │   └── Snap-26_composite.tif
+//        ├── Snap-25/
+//        │   ├── Snap-25_nuclei_ROIs.zip
+//        │   ├── Snap-25_C1_measurements.csv
+//        │   ├── Snap-25_C1_with_ROIs.tif
+//        │   ├── Snap-25_C2_with_ROIs.tif
+//        │   ├── Snap-25_C1.tif
+//        │   ├── Snap-25_C2.tif
+//        │   ├── Snap-25_composite_EDITABLE.tif
+//        │   └── Snap-25_composite.tif
+//        └── Snap-26/
+//            └── ...
+// ============================================================
+
+macro "Process Channels + Nuclei Mask + Measure" {
+
+    // ── Channel display settings ─────────────────────────────
+    luts    = newArray("Green", "Blue"); // LUT per channel (C1, C2)
+    minVals = newArray(0,       0   );   // min brightness per channel
+    maxVals = newArray(25,      120 );   // max brightness per channel
+    //                 ^C1=Green ^C2=Blue
+
+    // ── Nuclei detection settings (on C2) ────────────────────
+    // Common threshold options: "Default dark", "Otsu dark", "Triangle dark"
+    thresholdMethod = "Default dark";
+    gaussianSigma   = 1;        // smoothing before threshold (0 = none)
+    useWatershed    = false;    // separate touching nuclei
+
+    // Particle size filter (pixels^2)
+    minSize         = 10;
+    maxSize         = "Infinity";
+    circularityMin  = 0.00;
+    circularityMax  = 1.00;
+    // ────────────────────────────────────────────────────────
+
+    // ── Pick output directory ────────────────────────────────
+    saveDir = getDirectory("Choose output directory");
+
+    // ── Name the master batch folder ─────────────────────────
+    getDateAndTime(year, month, dayOfWeek, dayOfMonth, hour, minute, second, msec);
+    mm = month + 1;
+    mmStr = ""; if (mm < 10) mmStr = "0"; mmStr = mmStr + mm;
+    ddStr = ""; if (dayOfMonth < 10) ddStr = "0"; ddStr = ddStr + dayOfMonth;
+    hhStr = ""; if (hour < 10) hhStr = "0"; hhStr = hhStr + hour;
+    minStr = ""; if (minute < 10) minStr = "0"; minStr = minStr + minute;
+    defaultBatch = "Batch_" + year + "-" + mmStr + "-" + ddStr + "_" + hhStr + "-" + minStr;
+
+    batchName = getString("Name for this batch folder:", defaultBatch);
+    batchDir  = saveDir + batchName + File.separator;
+    if (!File.exists(batchDir)) File.makeDirectory(batchDir);
+    print("Batch folder: " + batchDir);
+
+    // ── Shared folder for all composite images ───────────────
+    compositeDir = batchDir + "All_Composites" + File.separator;
+    if (!File.exists(compositeDir)) File.makeDirectory(compositeDir);
+    // ────────────────────────────────────────────────────────
+
+    // Master CSV (accumulated across all images)
+    masterCSV = "Image,ROI,Area,Mean_C1\n";
+
+    // Snapshot all open images BEFORE any processing begins
+    nOrig      = nImages;
+    origIDs    = newArray(nOrig);
+    origTitles = newArray(nOrig);
+    for (i = 0; i < nOrig; i++) {
+        selectImage(i + 1);
+        origIDs[i]    = getImageID();
+        origTitles[i] = getTitle();
+    }
+
+    roiManager("reset");
+
+    // ── Main loop ─────────────────────────────────────────────
+    for (i = 0; i < nOrig; i++) {
+
+        if (!isOpen(origIDs[i])) continue;
+        selectImage(origIDs[i]);
+        title    = origTitles[i];
+        baseName = replace(title, "\\.[^.]+$", "");
+
+        getDimensions(w, h, channels, slices, frames);
+        if (channels < 2) {
+            print("Skipping (not multi-channel): " + title);
+            continue;
+        }
+        print("────────────────────────────────────────");
+        print("Processing: " + title + "  (" + channels + " channels)");
+
+        // ── Per-image output folder ──────────────────────────
+        imgDir = batchDir + baseName + File.separator;
+        if (!File.exists(imgDir)) File.makeDirectory(imgDir);
+
+        // ── Step 1: Split channels ───────────────────────────
+        run("Split Channels");
+
+        c1Title = "C1-" + title;
+        c2Title = "C2-" + title;
+
+        selectWindow(c1Title);
+        c1ID = getImageID();
+        selectWindow(c2Title);
+        c2ID = getImageID();
+
+        // ════════════════════════════════════════════════════
+        //  NUCLEI DETECTION (on a duplicate of C2)
+        // ════════════════════════════════════════════════════
+        selectImage(c2ID);
+        run("Duplicate...", "title=C2_mask");
+        if (gaussianSigma > 0) run("Gaussian Blur...", "sigma=" + gaussianSigma);
+        setAutoThreshold(thresholdMethod);
+        run("Convert to Mask");
+        if (useWatershed) run("Watershed");
+
+        roiManager("reset");
+        run("Analyze Particles...", "size=" + minSize + "-" + maxSize +
+            " circularity=" + circularityMin + "-" + circularityMax +
+            " show=Nothing clear add");
+
+        nROIs = roiManager("count");
+        print("  Found " + nROIs + " nuclei");
+        close(); // close C2_mask
+
+        if (nROIs > 0) {
+            roiManager("Save", imgDir + baseName + "_nuclei_ROIs.zip");
+        } else {
+            print("  No nuclei detected - skipping ROI/measurement steps for " + title);
+        }
+
+        // ════════════════════════════════════════════════════
+        //  CHANNEL DISPLAY SETTINGS (LUT + brightness)
+        // ════════════════════════════════════════════════════
+        selectImage(c1ID);
+        run(luts[0]);
+        setMinAndMax(minVals[0], maxVals[0]);
+
+        selectImage(c2ID);
+        run(luts[1]);
+        setMinAndMax(minVals[1], maxVals[1]);
+
+        // ════════════════════════════════════════════════════
+        //  MEASUREMENTS + QC OVERLAY (only if nuclei found)
+        // ════════════════════════════════════════════════════
+        if (nROIs > 0) {
+            // QC overlay: colored C1 with nuclei outlines
+            selectImage(c1ID);
+            run("Duplicate...", "title=C1_overlay");
+            roiManager("deselect");
+            roiManager("Show All");
+            run("Flatten");
+            saveAs("Tiff", imgDir + baseName + "_C1_with_ROIs.tif");
+            close();                 // close flattened overlay
+            selectWindow("C1_overlay"); close();
+            run("Select None");
+
+            // QC overlay: colored C2 with nuclei outlines (shows what was detected)
+            selectImage(c2ID);
+            run("Duplicate...", "title=C2_overlay");
+            roiManager("deselect");
+            roiManager("Show All");
+            run("Flatten");
+            saveAs("Tiff", imgDir + baseName + "_C2_with_ROIs.tif");
+            close();                 // close flattened overlay
+            selectWindow("C2_overlay"); close();
+            run("Select None");
+
+            // Measure mean C1 intensity + area at each nucleus
+            // (using getStatistics directly avoids Results-table /
+            //  "Limit to threshold" issues entirely)
+            selectImage(c1ID);
+            run("Select None");
+
+            // ── DEBUG INFO ─────────────────────────────────────
+            print("  [DEBUG] Measuring on image: " + getTitle());
+            print("  [DEBUG] Image ID: " + getImageID() + "  (expected c1ID=" + c1ID + ")");
+            print("  [DEBUG] Bit depth: " + bitDepth());
+            getDimensions(dw, dh, dc, dz, dt);
+            print("  [DEBUG] Dimensions: " + dw + "x" + dh + "  c=" + dc + " z=" + dz + " t=" + dt);
+            // ────────────────────────────────────────────────────
+
+            imageCSV = "ROI,Area,Mean_C1\n";
+            for (r = 0; r < nROIs; r++) {
+                roiManager("select", r);
+                getStatistics(area, mean, min, max, std, histogram);
+                if (r == 0) {
+                    print("  [DEBUG] ROI 0 -> area=" + area + " mean=" + mean + " min=" + min + " max=" + max);
+                }
+                imageCSV  += (r + 1) + "," + area + "," + mean + "\n";
+                masterCSV += baseName + "," + (r + 1) + "," + area + "," + mean + "\n";
+            }
+            File.saveString(imageCSV, imgDir + baseName + "_C1_measurements.csv");
+
+            roiManager("deselect");
+            roiManager("reset");
+            run("Select None");
+        }
+
+        // ════════════════════════════════════════════════════
+        //  EXPORT: individual channels + composite
+        // ════════════════════════════════════════════════════
+
+        // ── Flatten + save each individual channel ───────────
+        selectImage(c1ID);
+        run("Duplicate...", "title=dup_C1");
+        dupC1 = getImageID();
+        run("Flatten");
+        saveAs("Tiff", imgDir + baseName + "_C1.tif");
+        close();                          // close flattened
+        selectImage(dupC1); close();      // close duplicate
+
+        selectImage(c2ID);
+        run("Duplicate...", "title=dup_C2");
+        dupC2 = getImageID();
+        run("Flatten");
+        saveAs("Tiff", imgDir + baseName + "_C2.tif");
+        close();                          // close flattened
+        selectImage(dupC2); close();      // close duplicate
+
+        // ── Merge C1+C2 ────────────────────────────────────────
+        run("Merge Channels...", "c1=[" + c1Title + "] c2=[" + c2Title + "] create");
+        compositeID = getImageID();
+
+        Stack.setDisplayMode("composite");
+        Stack.setChannel(1); run(luts[0]); setMinAndMax(minVals[0], maxVals[0]);
+        Stack.setChannel(2); run(luts[1]); setMinAndMax(minVals[1], maxVals[1]);
+
+        // Save UNFLATTENED (channels preserved)
+        saveAs("Tiff", imgDir + baseName + "_composite_EDITABLE.tif");
+
+        // Flatten + save composite (+ copy to shared folder)
+        run("Flatten");
+        saveAs("Tiff", imgDir + baseName + "_composite.tif");
+        saveAs("Tiff", compositeDir + baseName + "_composite.tif");
+        close();                           // close flattened composite
+        selectImage(compositeID); close(); // close composite stack
+
+        print("  Saved to: " + imgDir);
+    }
+
+    // ── Save master CSV ────────────────────────────────────────
+    File.saveString(masterCSV, batchDir + "All_Measurements_Master.csv");
+
+    print("────────────────────────────────────────");
+    print("Done! Batch saved to: " + batchDir);
+    showMessage("Processing complete!\n \nBatch saved to:\n" + batchDir);
+}
