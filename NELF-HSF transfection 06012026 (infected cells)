@@ -1,0 +1,343 @@
+// ============================================================
+//  3-Channel Infection Analysis
+//
+//  Channel roles:
+//    C1 = bacteria (cytoplasm)
+//    C2 = signal of interest (to be measured inside nuclei)
+//    C3 = nuclei marker (used to generate nucleus ROIs)
+//
+//  For each open 3-channel image, this macro will:
+//
+//  -- Nuclei detection (from C3) --
+//    1. Split channels (C1, C2, C3)
+//    2. Threshold C3 -> binary mask -> Analyze Particles -> ROIs
+//    3. Save nucleus ROIs as a .zip
+//
+//  -- Per-nucleus measurements --
+//    4. Measure C2 (Area + Mean) inside each nucleus ROI
+//       -> this is your "signal in the nucleus" readout
+//    5. Enlarge each nucleus ROI outward by `cytoExpand` pixels
+//       to approximate the surrounding cell body, then measure
+//       C1 (Mean + Max) inside that expanded region
+//       -> this is your "bacteria near this cell" readout,
+//          even though C1 and the nucleus ROI never overlap
+//    6. Classify each cell as Infected (Yes/No) based on
+//       whether the C1 mean exceeds `infectionThreshold`
+//    7. Save a per-image CSV:
+//         ROI, Nucleus_Area, Mean_C2_nuclear,
+//         Cyto_Area, Mean_C1_cyto, Max_C1_cyto, Infected
+//    8. Append everything to one master CSV across all images
+//
+//  -- QC images --
+//    9. C3_with_NucleiROIs.tif  - nuclei channel + nucleus outlines
+//   10. C1_with_CytoROIs.tif    - bacteria channel + the enlarged
+//                                  "cell body" regions used for
+//                                  the infection measurement
+//
+//  -- Export: individual channels + all composite combinations --
+//   11. Flatten + save each individual channel (C1, C2, C3)
+//   12. Save every 2- and 3-channel combination
+//       (C1+C2, C1+C3, C2+C3, C1+C2+C3)
+//   13. The full C1+C2+C3 combo also gets an UNFLATTENED
+//       "_composite_EDITABLE.tif" and a copy in "All_Composites"
+//
+//  Folder structure:
+//    [chosen directory]/
+//    └── [Batch folder]/
+//        ├── All_Measurements_Master.csv
+//        ├── All_Composites/
+//        │   └── Snap-25_C1+C2+C3.tif
+//        ├── Snap-25/
+//        │   ├── Snap-25_nuclei_ROIs.zip
+//        │   ├── Snap-25_measurements.csv
+//        │   ├── Snap-25_C3_with_NucleiROIs.tif
+//        │   ├── Snap-25_C1_with_CytoROIs.tif
+//        │   ├── Snap-25_C1.tif
+//        │   ├── Snap-25_C2.tif
+//        │   ├── Snap-25_C3.tif
+//        │   ├── Snap-25_C1+C2.tif
+//        │   ├── Snap-25_C1+C3.tif
+//        │   ├── Snap-25_C2+C3.tif
+//        │   ├── Snap-25_C1+C2+C3.tif
+//        │   └── Snap-25_C1+C2+C3_composite_EDITABLE.tif
+//        └── Snap-26/
+//            └── ...
+// ============================================================
+
+macro "3-Channel Infection Analysis" {
+
+    // ── Channel display settings (LUT + brightness) ──────────
+    luts    = newArray("Red", "Green", "Blue"); // C1, C2, C3
+    minVals = newArray(0,     0,       0   );
+    maxVals = newArray(30,    25,      120 );
+    //                 ^C1=bacteria ^C2=signal ^C3=nuclei
+    //  *** Adjust these to your actual imaging settings ***
+
+    // ── Nuclei detection settings (on C3) ─────────────────────
+    thresholdMethod = "Default dark"; // try "Otsu dark"/"Triangle dark" if needed
+    gaussianSigma   = 1;
+    useWatershed    = false;  // touching nuclei stay merged into one ROI
+    minSize         = 10;             // pixels^2
+    maxSize         = "Infinity";
+    circularityMin  = 0.00;
+    circularityMax  = 1.00;
+
+    // ── Infection / cytoplasm settings ────────────────────────
+    cytoExpand        = 25;  // pixels to enlarge each nucleus ROI outward
+    infectionThreshold = 1.5; // Mean_C1_cyto >= this -> "Infected"
+    //  *** Both of these will need tuning for your dataset ***
+    // ────────────────────────────────────────────────────────
+
+    // ── Pick output directory ────────────────────────────────
+    saveDir = getDirectory("Choose output directory");
+
+    // ── Name the master batch folder ─────────────────────────
+    getDateAndTime(year, month, dayOfWeek, dayOfMonth, hour, minute, second, msec);
+    mm = month + 1;
+    mmStr = ""; if (mm < 10) mmStr = "0"; mmStr = mmStr + mm;
+    ddStr = ""; if (dayOfMonth < 10) ddStr = "0"; ddStr = ddStr + dayOfMonth;
+    hhStr = ""; if (hour < 10) hhStr = "0"; hhStr = hhStr + hour;
+    minStr = ""; if (minute < 10) minStr = "0"; minStr = minStr + minute;
+    defaultBatch = "InfectionAnalysis_" + year + "-" + mmStr + "-" + ddStr + "_" + hhStr + "-" + minStr;
+
+    batchName = getString("Name for this batch folder:", defaultBatch);
+    batchDir  = saveDir + batchName + File.separator;
+    if (!File.exists(batchDir)) File.makeDirectory(batchDir);
+    print("Batch folder: " + batchDir);
+
+    compositeDir = batchDir + "All_Composites" + File.separator;
+    if (!File.exists(compositeDir)) File.makeDirectory(compositeDir);
+    // ────────────────────────────────────────────────────────
+
+    masterCSV = "Image,ROI,Nucleus_Area,Mean_C2_nuclear,Cyto_Area,Mean_C1_cyto,Max_C1_cyto,Infected\n";
+
+    // Snapshot all open images BEFORE any processing begins
+    nOrig      = nImages;
+    origIDs    = newArray(nOrig);
+    origTitles = newArray(nOrig);
+    for (i = 0; i < nOrig; i++) {
+        selectImage(i + 1);
+        origIDs[i]    = getImageID();
+        origTitles[i] = getTitle();
+    }
+
+    roiManager("reset");
+
+    // ── Main loop ─────────────────────────────────────────────
+    for (i = 0; i < nOrig; i++) {
+
+        if (!isOpen(origIDs[i])) continue;
+        selectImage(origIDs[i]);
+        title    = origTitles[i];
+        baseName = replace(title, "\\.[^.]+$", "");
+
+        getDimensions(w, h, channels, slices, frames);
+        if (channels < 3) {
+            print("Skipping (fewer than 3 channels): " + title);
+            continue;
+        }
+        print("────────────────────────────────────────");
+        print("Processing: " + title + "  (" + channels + " channels)");
+
+        imgDir = batchDir + baseName + File.separator;
+        if (!File.exists(imgDir)) File.makeDirectory(imgDir);
+
+        // ── Split channels ────────────────────────────────────
+        run("Split Channels");
+
+        c1Title = "C1-" + title;
+        c2Title = "C2-" + title;
+        c3Title = "C3-" + title;
+
+        selectWindow(c1Title); c1ID = getImageID();
+        selectWindow(c2Title); c2ID = getImageID();
+        selectWindow(c3Title); c3ID = getImageID();
+
+        // ════════════════════════════════════════════════════
+        //  NUCLEI DETECTION (from C3)
+        // ════════════════════════════════════════════════════
+        selectImage(c3ID);
+        run("Duplicate...", "title=C3_mask");
+        if (gaussianSigma > 0) run("Gaussian Blur...", "sigma=" + gaussianSigma);
+        setAutoThreshold(thresholdMethod);
+        run("Convert to Mask");
+        if (useWatershed) run("Watershed");
+
+        roiManager("reset");
+        run("Analyze Particles...", "size=" + minSize + "-" + maxSize +
+            " circularity=" + circularityMin + "-" + circularityMax +
+            " show=Nothing clear add");
+
+        nROIs = roiManager("count");
+        print("  Found " + nROIs + " nuclei");
+        close(); // close C3_mask
+
+        if (nROIs > 0) {
+            roiManager("Save", imgDir + baseName + "_nuclei_ROIs.zip");
+        } else {
+            print("  No nuclei detected - skipping measurements for " + title);
+        }
+
+        // ════════════════════════════════════════════════════
+        //  PER-NUCLEUS MEASUREMENTS (C2 nuclear, C1 cytoplasmic)
+        // ════════════════════════════════════════════════════
+        if (nROIs > 0) {
+
+            // Reset any existing overlay on C1 before we start adding to it
+            selectImage(c1ID);
+            Overlay.remove();
+            run("Select None");
+
+            imageCSV = "ROI,Nucleus_Area,Mean_C2_nuclear,Cyto_Area,Mean_C1_cyto,Max_C1_cyto,Infected\n";
+
+            for (r = 0; r < nROIs; r++) {
+
+                // ── Nuclear signal (C2) ──────────────────────
+                selectImage(c2ID);
+                roiManager("select", r);
+                getStatistics(nucArea, meanC2, nucMin, nucMax, nucStd, nucHist);
+                run("Select None");
+
+                // ── Cytoplasmic / "cell body" signal (C1) ────
+                selectImage(c1ID);
+                roiManager("select", r);
+                run("Enlarge...", "enlarge=" + cytoExpand + " pixel");
+                getStatistics(cytoArea, meanC1, minC1, maxC1, cytoStd, cytoHist);
+                Overlay.addSelection("yellow");   // record for QC image
+                run("Select None");
+
+                // ── Infection classification ─────────────────
+                infected = "No";
+                if (meanC1 >= infectionThreshold) infected = "Yes";
+
+                imageCSV  += (r + 1) + "," + nucArea + "," + meanC2 + "," +
+                              cytoArea + "," + meanC1 + "," + maxC1 + "," + infected + "\n";
+                masterCSV += baseName + "," + (r + 1) + "," + nucArea + "," + meanC2 + "," +
+                              cytoArea + "," + meanC1 + "," + maxC1 + "," + infected + "\n";
+            }
+
+            File.saveString(imageCSV, imgDir + baseName + "_measurements.csv");
+
+            // ── QC: C1 with enlarged "cell body" outlines ─────
+            selectImage(c1ID);
+            run("Flatten");
+            saveAs("Tiff", imgDir + baseName + "_C1_with_CytoROIs.tif");
+            close();
+            selectImage(c1ID);
+            Overlay.remove();
+            run("Select None");
+
+            // ── QC: C3 with nucleus outlines ──────────────────
+            selectImage(c3ID);
+            roiManager("deselect");
+            roiManager("Show All");
+            run("Flatten");
+            saveAs("Tiff", imgDir + baseName + "_C3_with_NucleiROIs.tif");
+            close();
+            roiManager("Show None");
+            run("Select None");
+
+            roiManager("reset");
+        }
+
+        // ════════════════════════════════════════════════════
+        //  CHANNEL DISPLAY SETTINGS (LUT + brightness)
+        // ════════════════════════════════════════════════════
+        selectImage(c1ID); run(luts[0]); setMinAndMax(minVals[0], maxVals[0]);
+        selectImage(c2ID); run(luts[1]); setMinAndMax(minVals[1], maxVals[1]);
+        selectImage(c3ID); run(luts[2]); setMinAndMax(minVals[2], maxVals[2]);
+
+        channelTitles = newArray(c1Title, c2Title, c3Title);
+        channelIDs    = newArray(c1ID, c2ID, c3ID);
+
+        // ════════════════════════════════════════════════════
+        //  EXPORT: individual channels
+        // ════════════════════════════════════════════════════
+        for (c = 0; c < channels; c++) {
+            selectImage(channelIDs[c]);
+            run("Duplicate...", "title=dup_C" + (c + 1));
+            dupID = getImageID();
+            run("Flatten");
+            saveAs("Tiff", imgDir + baseName + "_C" + (c + 1) + ".tif");
+            close();                    // close flattened
+            selectImage(dupID); close(); // close duplicate
+        }
+
+        // ════════════════════════════════════════════════════
+        //  EXPORT: all 2+ channel combinations (bitmask)
+        // ════════════════════════════════════════════════════
+        maxMask = round(pow(2, channels)) - 1;
+
+        for (mask = 3; mask <= maxMask; mask++) {
+
+            bitCount = 0;
+            for (c = 0; c < channels; c++) {
+                if (floor(mask / pow(2, c)) % 2 == 1) bitCount++;
+            }
+            if (bitCount < 2) continue;
+
+            comboName = "";
+            mergeStr  = "";
+            dupIDs    = newArray(bitCount);
+            slot      = 0;
+
+            for (c = 0; c < channels; c++) {
+                if (floor(mask / pow(2, c)) % 2 == 1) {
+                    if (comboName != "") comboName += "+";
+                    comboName += "C" + (c + 1);
+
+                    dupTitle = "tmp_" + mask + "_C" + (c + 1);
+                    selectImage(channelIDs[c]);
+                    run("Duplicate...", "title=" + dupTitle);
+                    dupIDs[slot] = getImageID();
+                    mergeStr += "c" + (slot + 1) + "=[" + dupTitle + "] ";
+                    slot++;
+                }
+            }
+
+            run("Merge Channels...", mergeStr + "create");
+            comboID = getImageID();
+
+            Stack.setDisplayMode("composite");
+            slot = 0;
+            for (c = 0; c < channels; c++) {
+                if (floor(mask / pow(2, c)) % 2 == 1) {
+                    Stack.setChannel(slot + 1);
+                    run(luts[c]);
+                    setMinAndMax(minVals[c], maxVals[c]);
+                    slot++;
+                }
+            }
+
+            if (mask == maxMask) {
+                saveAs("Tiff", imgDir + baseName + "_" + comboName + "_composite_EDITABLE.tif");
+            }
+
+            run("Flatten");
+            saveAs("Tiff", imgDir + baseName + "_" + comboName + ".tif");
+            if (mask == maxMask) {
+                saveAs("Tiff", compositeDir + baseName + "_" + comboName + ".tif");
+            }
+            close();                         // close flattened
+            selectImage(comboID); close();   // close composite
+
+            for (k = 0; k < bitCount; k++) {
+                if (isOpen(dupIDs[k])) { selectImage(dupIDs[k]); close(); }
+            }
+
+            print("  Saved combo: " + comboName);
+        }
+
+        // Close any remaining channel windows
+        for (c = 0; c < channels; c++) {
+            if (isOpen(channelIDs[c])) { selectImage(channelIDs[c]); close(); }
+        }
+
+        print("  Saved to: " + imgDir);
+    }
+
+    File.saveString(masterCSV, batchDir + "All_Measurements_Master.csv");
+
+    print("────────────────────────────────────────");
+    print("Done! Batch saved to: " + batchDir);
+    showMessage("Processing complete!\n \nBatch saved to:\n" + batchDir);
