@@ -31,11 +31,35 @@
 
 macro "Process All Open 3-Channel Images" {
 
-    // ── Configurable settings ────────────────────────────────
-    luts    = newArray("Red", "Green", "Blue"); // LUT per channel (C1-C3)
-    minVals = newArray(10,    3,       5   );   // min brightness per channel
-    maxVals = newArray(60,    20,      30  );   // max brightness per channel
-    //                 ^C1         ^C2         ^C3
+    // ── Channel settings dialog (runs once before all images) ─
+    lutOptions = newArray("Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", "Grays");
+
+    Dialog.create("Channel Settings");
+    Dialog.addMessage("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    Dialog.addMessage("  Set LUT and brightness for each channel");
+    Dialog.addMessage("  (these apply to ALL open images)");
+    Dialog.addMessage("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    Dialog.addMessage("Channel 1:");
+    Dialog.addChoice("  Color",   lutOptions, "Red");
+    Dialog.addNumber("  Min",     10);
+    Dialog.addNumber("  Max",     60);
+
+    Dialog.addMessage("Channel 2:");
+    Dialog.addChoice("  Color",   lutOptions, "Green");
+    Dialog.addNumber("  Min",     3);
+    Dialog.addNumber("  Max",     70);
+
+    Dialog.addMessage("Channel 3:");
+    Dialog.addChoice("  Color",   lutOptions, "Blue");
+    Dialog.addNumber("  Min",     5);
+    Dialog.addNumber("  Max",     30);
+
+    Dialog.show();
+
+    luts    = newArray(Dialog.getChoice(), Dialog.getChoice(), Dialog.getChoice());
+    minVals = newArray(Dialog.getNumber(), Dialog.getNumber(), Dialog.getNumber());
+    maxVals = newArray(Dialog.getNumber(), Dialog.getNumber(), Dialog.getNumber());
     // ────────────────────────────────────────────────────────
 
     // ── Pick root output directory ───────────────────────────
@@ -80,8 +104,6 @@ macro "Process All Open 3-Channel Images" {
 
     // ── Main loop ─────────────────────────────────────────────
     for (i = 0; i < nOrig; i++) {
-
-        print("[DEBUG] Loop iteration i=" + i + "  title=" + origTitles[i] + "  isOpen=" + isOpen(origIDs[i]));
 
         if (!isOpen(origIDs[i])) continue;
         selectImage(origIDs[i]);
@@ -171,10 +193,14 @@ macro "Process All Open 3-Channel Images" {
                     if (comboName != "") comboName += "+";
                     comboName += "C" + (c + 1);
 
-                    dupTitle = "tmp_" + mask + "_C" + (c + 1);
+                    dupTitle = "tmp_img" + i + "_m" + mask + "_C" + (c + 1);
                     selectImage(channelIDs[c]);
+                    sourceTitle = getTitle();
+                    sourceMin = getValue("Min");
+                    sourceMax = getValue("Max");
                     run("Duplicate...", "title=" + dupTitle);
                     dupIDs[slot] = getImageID();
+                    print("    [DEBUG] combo mask=" + mask + " slot=" + slot + " src=[" + sourceTitle + "] (min=" + sourceMin + " max=" + sourceMax + ") -> dup=[" + getTitle() + "] ID=" + dupIDs[slot]);
                     mergeStr += "c" + (slot + 1) + "=[" + dupTitle + "] ";
                     slot++;
                 }
