@@ -57,9 +57,19 @@ macro "Process All Open 3-Channel Images" {
 
     Dialog.show();
 
-    luts    = newArray(Dialog.getChoice(), Dialog.getChoice(), Dialog.getChoice());
-    minVals = newArray(Dialog.getNumber(), Dialog.getNumber(), Dialog.getNumber());
-    maxVals = newArray(Dialog.getNumber(), Dialog.getNumber(), Dialog.getNumber());
+    c1lut = Dialog.getChoice();
+    c1min = Dialog.getNumber();
+    c1max = Dialog.getNumber();
+    c2lut = Dialog.getChoice();
+    c2min = Dialog.getNumber();
+    c2max = Dialog.getNumber();
+    c3lut = Dialog.getChoice();
+    c3min = Dialog.getNumber();
+    c3max = Dialog.getNumber();
+
+    luts    = newArray(c1lut, c2lut, c3lut);
+    minVals = newArray(c1min, c2min, c3min);
+    maxVals = newArray(c1max, c2max, c3max);
     // ────────────────────────────────────────────────────────
 
     // ── Pick root output directory ───────────────────────────
@@ -259,3 +269,4 @@ macro "Process All Open 3-Channel Images" {
     print("Done! Batch saved to: " + batchDir);
     showMessage("Processing complete!\n \nBatch saved to:\n" + batchDir);
 }
+
