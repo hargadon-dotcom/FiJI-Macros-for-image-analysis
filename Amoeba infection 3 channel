@@ -1,0 +1,235 @@
+// ============================================================
+//  Process All Open 3-Channel Images
+//
+//  For each open image, this macro will:
+//    1. Split channels
+//    2. Apply LUTs + brightness/contrast per channel
+//    3. Flatten + save each individual channel
+//    4. Save ALL combinations of channels
+//       (C1+C2, C1+C3, C2+C3, C1+C2+C3)
+//    5. Save full composite UNFLATTENED (editable, channels intact)
+//    6. Save full composite flattened
+//       (also copied to a shared "All_Composites" folder)
+//
+//  Folder structure:
+//    [chosen directory]/
+//    └── [Batch folder - named by you, defaults to today's date+time]/
+//        ├── All_Composites/
+//        │   └── Snap-25_C1+C2+C3.tif
+//        ├── Snap-25/
+//        │   ├── Snap-25_C1.tif
+//        │   ├── Snap-25_C2.tif
+//        │   ├── Snap-25_C3.tif
+//        │   ├── Snap-25_C1+C2.tif
+//        │   ├── Snap-25_C1+C3.tif
+//        │   ├── Snap-25_C2+C3.tif
+//        │   ├── Snap-25_C1+C2+C3.tif
+//        │   └── Snap-25_C1+C2+C3_composite_EDITABLE.tif
+//        └── Snap-26/
+//            └── ...
+// ============================================================
+
+macro "Process All Open 3-Channel Images" {
+
+    // ── Configurable settings ────────────────────────────────
+    luts    = newArray("Red", "Green", "Blue"); // LUT per channel (C1-C3)
+    minVals = newArray(10,    3,       5   );   // min brightness per channel
+    maxVals = newArray(60,    20,      30  );   // max brightness per channel
+    //                 ^C1         ^C2         ^C3
+    // ────────────────────────────────────────────────────────
+
+    // ── Pick root output directory ───────────────────────────
+    saveDir = getDirectory("Choose output directory");
+
+    // ── Name the master batch folder ─────────────────────────
+    getDateAndTime(year, month, dayOfWeek, dayOfMonth, hour, minute, second, msec);
+    mm = month + 1;
+    mmStr = ""; if (mm < 10) mmStr = "0"; mmStr = mmStr + mm;
+    ddStr = ""; if (dayOfMonth < 10) ddStr = "0"; ddStr = ddStr + dayOfMonth;
+    hhStr = ""; if (hour < 10) hhStr = "0"; hhStr = hhStr + hour;
+    minStr = ""; if (minute < 10) minStr = "0"; minStr = minStr + minute;
+    defaultBatch = "Batch_" + year + "-" + mmStr + "-" + ddStr + "_" + hhStr + "-" + minStr;
+
+    batchName = getString("Name for this batch folder:", defaultBatch);
+    batchDir  = saveDir + batchName + File.separator;
+    if (!File.exists(batchDir)) File.makeDirectory(batchDir);
+    print("Batch folder: " + batchDir);
+
+    // ── Create a shared folder for all composite images ──────
+    compositeDir = batchDir + "All_Composites" + File.separator;
+    if (!File.exists(compositeDir)) File.makeDirectory(compositeDir);
+    // ────────────────────────────────────────────────────────
+
+    // Snapshot all open images BEFORE any processing begins
+    nOrig      = nImages;
+    origIDs    = newArray(nOrig);
+    origTitles = newArray(nOrig);
+    for (i = 0; i < nOrig; i++) {
+        selectImage(i + 1);
+        origIDs[i]    = getImageID();
+        origTitles[i] = getTitle();
+    }
+
+    // ── DEBUG: confirm what was captured ─────────────────────
+    print("════════════════════════════════════════");
+    print("[DEBUG] Images open at macro start: " + nOrig);
+    for (i = 0; i < nOrig; i++) {
+        print("  [DEBUG] [" + i + "] " + origTitles[i] + "  (ID=" + origIDs[i] + ")");
+    }
+    print("════════════════════════════════════════");
+
+    // ── Main loop ─────────────────────────────────────────────
+    for (i = 0; i < nOrig; i++) {
+
+        print("[DEBUG] Loop iteration i=" + i + "  title=" + origTitles[i] + "  isOpen=" + isOpen(origIDs[i]));
+
+        if (!isOpen(origIDs[i])) continue;
+        selectImage(origIDs[i]);
+        title    = origTitles[i];
+
+        // Strip a trailing file extension ONLY if the title truly ends
+        // with one (handles multi-series files like "name.czi - name.czi #01"
+        // where the old "last dot to end" approach collapsed all series
+        // into the same folder name).
+        baseName = title;
+        extList = newArray(".czi", ".tif", ".tiff", ".png", ".jpg", ".lsm", ".nd2", ".lif");
+        for (e = 0; e < extList.length; e++) {
+            if (endsWith(toLowerCase(baseName), extList[e])) {
+                baseName = substring(baseName, 0, lengthOf(baseName) - lengthOf(extList[e]));
+            }
+        }
+
+        getDimensions(w, h, channels, slices, frames);
+        if (channels < 2) {
+            print("Skipping (not multi-channel): " + title);
+            continue;
+        }
+        print("Processing: " + title + "  (" + channels + " channels)");
+
+        // ── Create a per-image subfolder inside the batch folder
+        imgDir = batchDir + baseName + File.separator;
+        if (!File.exists(imgDir)) File.makeDirectory(imgDir);
+
+        // ── Step 1: Split channels ───────────────────────────
+        run("Split Channels");
+
+        channelTitles = newArray(channels);
+        channelIDs    = newArray(channels);
+        for (c = 0; c < channels; c++) {
+            cTitle = "C" + (c + 1) + "-" + title;
+            selectImage(cTitle);
+            channelTitles[c] = cTitle;
+            channelIDs[c]    = getImageID();
+        }
+
+        // ── Step 2: Apply LUT + brightness to each channel ───
+        for (c = 0; c < channels; c++) {
+            selectImage(channelIDs[c]);
+            if (c < luts.length)    run(luts[c]);
+            if (c < minVals.length) setMinAndMax(minVals[c], maxVals[c]);
+        }
+
+        // ── Step 3: Flatten + save each individual channel ───
+        for (c = 0; c < channels; c++) {
+            selectImage(channelIDs[c]);
+            run("Duplicate...", "title=dup_C" + (c + 1));
+            dupID = getImageID();
+            run("Flatten");
+            saveAs("Tiff", imgDir + baseName + "_C" + (c + 1) + ".tif");
+            close();                     // close flattened
+            selectImage(dupID); close(); // close duplicate
+        }
+
+        // ── Steps 4-6: All channel combinations ──────────────
+        //
+        //  Uses a bitmask to enumerate every possible subset of channels.
+        //  e.g. for 3 channels, mask 101 (binary) = C1+C3
+        //  Skips single-channel masks (already saved above).
+        //  The full mask (all channels) gets the extra EDITABLE save
+        //  and a copy in the shared "All_Composites" folder.
+        //
+        maxMask = round(pow(2, channels)) - 1;
+
+        for (mask = 3; mask <= maxMask; mask++) {
+
+            // Count how many channels are in this combo
+            bitCount = 0;
+            for (c = 0; c < channels; c++) {
+                if (floor(mask / pow(2, c)) % 2 == 1) bitCount++;
+            }
+            if (bitCount < 2) continue;  // skip single-channel masks
+
+            // Build the combo name (e.g. "C1+C3") and
+            // duplicate each needed channel so the originals stay intact
+            comboName = "";
+            mergeStr  = "";
+            dupIDs    = newArray(bitCount);
+            slot      = 0;
+
+            for (c = 0; c < channels; c++) {
+                if (floor(mask / pow(2, c)) % 2 == 1) {
+                    if (comboName != "") comboName += "+";
+                    comboName += "C" + (c + 1);
+
+                    dupTitle = "tmp_" + mask + "_C" + (c + 1);
+                    selectImage(channelIDs[c]);
+                    run("Duplicate...", "title=" + dupTitle);
+                    dupIDs[slot] = getImageID();
+                    mergeStr += "c" + (slot + 1) + "=[" + dupTitle + "] ";
+                    slot++;
+                }
+            }
+
+            // Merge the duplicated channels
+            run("Merge Channels...", mergeStr + "create");
+            comboID = getImageID();
+
+            // Re-apply correct LUTs + brightness for each slot
+            Stack.setDisplayMode("composite");
+            slot = 0;
+            for (c = 0; c < channels; c++) {
+                if (floor(mask / pow(2, c)) % 2 == 1) {
+                    Stack.setChannel(slot + 1);
+                    if (c < luts.length)    run(luts[c]);
+                    if (c < minVals.length) setMinAndMax(minVals[c], maxVals[c]);
+                    slot++;
+                }
+            }
+
+            // Full combo (all channels): also save the editable version
+            if (mask == maxMask) {
+                saveAs("Tiff", imgDir + baseName + "_" + comboName + "_composite_EDITABLE.tif");
+            }
+
+            // Flatten and save
+            run("Flatten");
+            saveAs("Tiff", imgDir + baseName + "_" + comboName + ".tif");
+            if (mask == maxMask) {
+                saveAs("Tiff", compositeDir + baseName + "_" + comboName + ".tif");
+            }
+            close();                         // close flattened
+            selectImage(comboID); close();   // close composite
+
+            // Close any duplicates the merge left open
+            for (k = 0; k < bitCount; k++) {
+                if (isOpen(dupIDs[k])) { selectImage(dupIDs[k]); close(); }
+            }
+
+            print("  Saved: " + comboName);
+        }
+
+        // Safety: close any original channel images still open
+        for (c = 0; c < channels; c++) {
+            if (isOpen(channelIDs[c])) {
+                selectImage(channelIDs[c]);
+                close();
+            }
+        }
+
+        print("  All combos saved to: " + imgDir);
+    }
+
+    print("────────────────────────────────────────");
+    print("Done! Batch saved to: " + batchDir);
+    showMessage("Processing complete!\n \nBatch saved to:\n" + batchDir);
+}
