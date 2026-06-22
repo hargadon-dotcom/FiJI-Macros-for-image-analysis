@@ -1,0 +1,146 @@
+// ============================================================
+//  Cell + Bacteria Counter — Multi-Image
+//
+//  Loops through every open image. For each one:
+//    1. Click cells -> numbered dots appear on image
+//    2. Zoom to each cell, type bacteria count, press Enter
+//
+//  All images feed into one master CSV you name at the end.
+//  The image filename is recorded alongside each measurement
+//  so you can tell which rows belong to which image.
+// ============================================================
+
+macro "Cell and Bacteria Counter" {
+
+    if (nImages == 0) {
+        showMessage("No images open. Please open your images first.");
+        exit;
+    }
+
+    // Snapshot all open images before we start
+    nOrig      = nImages;
+    origIDs    = newArray(nOrig);
+    origTitles = newArray(nOrig);
+    for (i = 0; i < nOrig; i++) {
+        selectImage(i + 1);
+        origIDs[i]    = getImageID();
+        origTitles[i] = getTitle();
+    }
+
+    // Clear any existing results
+    run("Clear Results");
+    resultRow = 0;
+
+    // ── Loop through each open image ─────────────────────────
+    for (i = 0; i < nOrig; i++) {
+
+        if (!isOpen(origIDs[i])) continue;
+        selectImage(origIDs[i]);
+        imgTitle = origTitles[i];
+
+        showMessage("Starting image " + (i+1) + " of " + nOrig,
+            "Current image: " + imgTitle + "\n \n" +
+            "Click OK to begin labeling cells.");
+
+        // ── Click all cells ───────────────────────────────────
+        run("Remove Overlay");
+        run("Select None");
+        setTool("multipoint");
+
+        waitForUser("Label Cells — " + imgTitle,
+            "Click once on each cell.\n \n" +
+            "Press OK when all cells are clicked.");
+
+        sType = selectionType();
+        if (sType == -1) {
+            if (getBoolean("No cells clicked on " + imgTitle + ". Skip this image?")) {
+                continue;
+            } else {
+                exit;
+            }
+        }
+
+        getSelectionCoordinates(xCoords, yCoords);
+        nCells = xCoords.length;
+
+        if (nCells == 0) {
+            print("Skipping " + imgTitle + " — no points found.");
+            continue;
+        }
+
+        run("Select None");
+
+        // ── Draw numbered labels on overlay ───────────────────
+        run("Remove Overlay");
+
+        for (n = 0; n < nCells; n++) {
+            x = xCoords[n];
+            y = yCoords[n];
+
+            makeOval(x - 5, y - 5, 10, 10);
+            Overlay.addSelection("yellow");
+            run("Select None");
+
+            setFont("SansSerif", 16, "bold");
+            setColor("yellow");
+            Overlay.drawString("" + (n + 1), x + 7, y + 6);
+        }
+
+        Overlay.show();
+        run("Select None");
+
+        // ── Bacteria count per cell ───────────────────────────
+        zoomSize = 200;
+
+        for (n = 0; n < nCells; n++) {
+            cellNum = n + 1;
+
+            // Zoom to this cell
+            x  = xCoords[n];
+            y  = yCoords[n];
+            rx = x - zoomSize; if (rx < 0) rx = 0;
+            ry = y - zoomSize; if (ry < 0) ry = 0;
+            makeRectangle(rx, ry, zoomSize * 2, zoomSize * 2);
+            run("To Selection");
+            run("Select None");
+
+            Dialog.create("Image " + (i+1) + "/" + nOrig + "  —  Cell " + cellNum + " of " + nCells);
+            Dialog.addNumber("Intracellular bacteria:", 0);
+            Dialog.addNumber("External bacteria:",      0);
+            Dialog.show();
+            intraCount = Dialog.getNumber();
+            extCount   = Dialog.getNumber();
+
+            // Write row into results table
+            setResult("Image",                  resultRow, imgTitle);
+            setResult("Cell #",                 resultRow, cellNum);
+            setResult("X (px)",                 resultRow, xCoords[n]);
+            setResult("Y (px)",                 resultRow, yCoords[n]);
+            setResult("Intracellular Bacteria", resultRow, intraCount);
+            setResult("External Bacteria",      resultRow, extCount);
+            setResult("Total Bacteria",         resultRow, intraCount + extCount);
+            resultRow++;
+        }
+
+        // Reset zoom
+        run("Set... ", "zoom=100 x=0 y=0");
+        run("Select None");
+
+        print("Done: " + imgTitle + " (" + nCells + " cells)");
+    }
+
+    // ── Update and rename the results table ──────────────────
+    updateResults();
+    IJ.renameResults("Cell & Bacteria Counts");
+
+    // ── Save as CSV with a custom name ───────────────────────
+    csvName = getString("Name for the CSV file:", "cell_bacteria_counts");
+    saveDir = getDirectory("Choose save location");
+    savePath = saveDir + csvName + ".csv";
+    saveAs("Results", savePath);
+
+    print("Saved: " + savePath);
+    showMessage("Done!",
+        "Processed " + nOrig + " images.\n \n" +
+        "Saved to:\n" + savePath);
+}
