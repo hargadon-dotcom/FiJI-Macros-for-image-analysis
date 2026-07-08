@@ -1,0 +1,81 @@
+// ============================================================
+//  Split, Color, and Merge All Open 4-Channel Images
+//
+//  Channel colors:
+//    C1 = Grays
+//    C2 = Red
+//    C3 = Green
+//    C4 = Cyan
+// ============================================================
+
+macro "Split Merge 4 Channel" {
+
+    if (nImages == 0) {
+        showMessage("No images open. Please open your images first.");
+        exit;
+    }
+
+    // Snapshot all open images
+    nOrig      = nImages;
+    origIDs    = newArray(nOrig);
+    origTitles = newArray(nOrig);
+    for (i = 0; i < nOrig; i++) {
+        selectImage(i + 1);
+        origIDs[i]    = getImageID();
+        origTitles[i] = getTitle();
+    }
+
+    luts = newArray("Grays", "Red", "Green", "Cyan");
+
+    // ── Main loop ─────────────────────────────────────────────
+    for (i = 0; i < nOrig; i++) {
+
+        if (!isOpen(origIDs[i])) continue;
+        selectImage(origIDs[i]);
+        title    = origTitles[i];
+
+        getDimensions(w, h, channels, slices, frames);
+        if (channels < 2) {
+            print("Skipping (not multi-channel): " + title);
+            continue;
+        }
+        print("Processing: " + title + "  (" + channels + " channels)");
+
+        // ── Split ─────────────────────────────────────────────
+        run("Split Channels");
+
+        channelTitles = newArray(channels);
+        channelIDs    = newArray(channels);
+        for (c = 0; c < channels; c++) {
+            cTitle = "C" + (c + 1) + "-" + title;
+            selectImage(cTitle);
+            channelTitles[c] = cTitle;
+            channelIDs[c]    = getImageID();
+        }
+
+        // ── Apply LUTs ────────────────────────────────────────
+        for (c = 0; c < channels; c++) {
+            selectImage(channelIDs[c]);
+            if (c < luts.length) run(luts[c]);
+        }
+
+        // ── Merge ─────────────────────────────────────────────
+        mergeStr = "";
+        for (c = 0; c < channels; c++) {
+            mergeStr += "c" + (c + 1) + "=[" + channelTitles[c] + "] ";
+        }
+        run("Merge Channels...", mergeStr + "create");
+        compositeID = getImageID();
+
+        // Re-apply LUTs on composite
+        Stack.setDisplayMode("composite");
+        for (c = 0; c < channels; c++) {
+            Stack.setChannel(c + 1);
+            if (c < luts.length) run(luts[c]);
+        }
+
+        print("  Done: " + title);
+    }
+
+    print("All images processed.");
+}
