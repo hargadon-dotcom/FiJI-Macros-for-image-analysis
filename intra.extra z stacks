@@ -1,0 +1,255 @@
+// ============================================================
+//  Bacteria Counter — Side-by-Side Channel View
+//
+//  For each open 3-channel CZI, this macro:
+//    1. Lets you click on each cell in the composite
+//    2. For each cell, opens a side-by-side crop of all 3
+//       channels so you can see them individually
+//    3. You count red-only, blue-only, red+blue, and
+//       adjacent bacteria per cell
+//    4. Saves everything to a named CSV
+//
+//  Channel layout assumed:
+//    C1 = Grey (DAPI / cell body)
+//    C2 = Red  (bacteria channel 1)
+//    C3 = Blue (bacteria channel 2)
+// ============================================================
+
+macro "Bacteria Counter Side By Side" {
+
+    if (nImages == 0) {
+        showMessage("No images open. Please open your images first.");
+        exit;
+    }
+
+    // ── Settings ─────────────────────────────────────────────
+    cropRadius = 80;    // pixels around each cell to crop
+
+    // ── Color picker dialog ───────────────────────────────────
+    lutOptions = newArray("Grays", "Red", "Green", "Blue",
+                          "Cyan", "Magenta", "Yellow");
+
+    Dialog.create("Channel Colors + Crop Size");
+    Dialog.addMessage("Set a color for each channel:");
+    Dialog.addChoice("Channel 1:", lutOptions, "Grays");
+    Dialog.addChoice("Channel 2:", lutOptions, "Red");
+    Dialog.addChoice("Channel 3:", lutOptions, "Blue");
+    Dialog.addMessage(" ");
+    Dialog.addNumber("Crop radius (px):", cropRadius);
+    Dialog.show();
+
+    c1lut      = Dialog.getChoice();
+    c2lut      = Dialog.getChoice();
+    c3lut      = Dialog.getChoice();
+    cropRadius = Dialog.getNumber();
+
+    luts       = newArray(c1lut, c2lut, c3lut);
+    // ────────────────────────────────────────────────────────
+
+    // Snapshot all open images
+    nOrig      = nImages;
+    origIDs    = newArray(nOrig);
+    origTitles = newArray(nOrig);
+    for (i = 0; i < nOrig; i++) {
+        selectImage(i + 1);
+        origIDs[i]    = getImageID();
+        origTitles[i] = getTitle();
+    }
+
+    run("Clear Results");
+    resultRow = 0;
+
+    // ── Main loop ─────────────────────────────────────────────
+    for (i = 0; i < nOrig; i++) {
+
+        if (!isOpen(origIDs[i])) continue;
+        selectImage(origIDs[i]);
+        imgTitle = origTitles[i];
+
+        getDimensions(w, h, channels, slices, frames);
+        if (channels < 2) {
+            print("Skipping (not multi-channel): " + imgTitle);
+            continue;
+        }
+        print("Processing: " + imgTitle + " (" + channels + " channels)");
+
+        // ── Z Project → Split → Merge ─────────────────────────
+        // If z-stack, make a max intensity projection first.
+        // Then split its channels (keeping duplicates for cropping),
+        // merge them back into a composite for cell clicking.
+
+        selectImage(origIDs[i]);
+
+        if (slices > 1) {
+            run("Z Project...", "projection=[Max Intensity]");
+            projTitle = getTitle();
+            projID    = getImageID();
+            print("  Max projection created: " + projTitle);
+        } else {
+            // For 2D images just duplicate as the "projection"
+            run("Duplicate...", "title=[MAX_" + imgTitle + "] duplicate");
+            projTitle = getTitle();
+            projID    = getImageID();
+        }
+
+        // Split the projection into individual channel images
+        selectImage(projID);
+        run("Split Channels");
+
+        // For each channel:
+        //   - duplicate it → kept open for cropping (channelIDs)
+        //   - apply LUT to both the duplicate and the original split image
+        //   - keep original split image for merging back into composite
+        channelIDs    = newArray(channels);
+        splitTitles   = newArray(channels);
+
+        for (c = 0; c < channels; c++) {
+            cTitle = "C" + (c + 1) + "-" + projTitle;
+            selectImage(cTitle);
+            splitTitles[c] = cTitle;
+
+            // Duplicate → this is what we crop from during counting
+            run("Duplicate...", "title=[ch_" + c + "_" + i + "]");
+            channelIDs[c] = getImageID();
+            if (c < luts.length) run(luts[c]);
+
+            // Also apply LUT to the original split image (for merge)
+            selectImage(cTitle);
+            if (c < luts.length) run(luts[c]);
+        }
+
+        // Merge the split channel images back into one composite
+        mergeStr = "";
+        for (c = 0; c < channels; c++) {
+            mergeStr += "c" + (c + 1) + "=[" + splitTitles[c] + "] ";
+        }
+        run("Merge Channels...", mergeStr + "create");
+        mergedID    = getImageID();
+        mergedTitle = getTitle();
+
+        Stack.setDisplayMode("composite");
+        for (c = 0; c < channels; c++) {
+            Stack.setChannel(c + 1);
+            if (c < luts.length) run(luts[c]);
+        }
+        print("  Channels merged: " + mergedTitle);
+
+        // ── Click all cells on the merged max projection ──────
+        selectImage(mergedID);
+        run("Remove Overlay");
+        run("Select None");
+        setTool("multipoint");
+
+        waitForUser("Label Cells — " + mergedTitle,
+            "Click once on each cell in the max projection.\n \n" +
+            "Press OK when all cells are clicked.");
+
+        if (selectionType() == -1) {
+            if (getBoolean("No cells clicked. Skip this image?")) {
+                for (c = 0; c < channels; c++) {
+                    if (isOpen(channelIDs[c])) { selectImage(channelIDs[c]); close(); }
+                }
+                selectImage(mergedID); close();
+                continue;
+            } else { exit; }
+        }
+
+        getSelectionCoordinates(xCoords, yCoords);
+        nCells = xCoords.length;
+        run("Select None");
+
+        // ── Draw numbered labels on merged projection overlay ─
+        selectImage(mergedID);
+        run("Remove Overlay");
+        for (n = 0; n < nCells; n++) {
+            x = xCoords[n]; y = yCoords[n];
+            makeOval(x - 5, y - 5, 10, 10);
+            Overlay.addSelection("yellow");
+            run("Select None");
+            setFont("SansSerif", 14, "bold");
+            setColor("yellow");
+            Overlay.drawString("" + (n + 1), x + 7, y + 5);
+        }
+        Overlay.show();
+        run("Select None");
+
+        // ── Per-cell counting ─────────────────────────────────
+        for (n = 0; n < nCells; n++) {
+            cellNum = n + 1;
+            cx = xCoords[n];
+            cy = yCoords[n];
+
+            // Zoom to this cell on the merged projection
+            selectImage(mergedID);
+            rx = cx - cropRadius; if (rx < 0) rx = 0;
+            ry = cy - cropRadius; if (ry < 0) ry = 0;
+            rw = cropRadius * 2;  if (rx + rw > w) rw = w - rx;
+            rh = cropRadius * 2;  if (ry + rh > h) rh = h - ry;
+            makeRectangle(rx, ry, rw, rh);
+            run("To Selection");
+            run("Select None");
+
+            // ── Pause for B/C adjustment ──────────────────────
+            // waitForUser is non-blocking for image tools — adjust
+            // brightness/contrast freely, then click OK to count.
+            waitForUser("Cell " + cellNum + " of " + nCells,
+                "Adjust Brightness/Contrast now if needed\n" +
+                "(Image → Adjust → Brightness/Contrast)\n \n" +
+                "Press OK when ready to enter counts.");
+
+            // ── Counting dialog ───────────────────────────────
+            Dialog.create("Cell " + cellNum + " of " + nCells);
+            Dialog.addMessage("Count bacteria visible in this cell:");
+            Dialog.addNumber("Red only:",                        0);
+            Dialog.addNumber("Blue only:",                       0);
+            Dialog.addNumber("Red + Blue (both):",               0);
+            Dialog.addNumber("Adjacent (outside cell, nearby):", 0);
+            Dialog.addString("Notes:", "");
+            Dialog.show();
+
+            redOnly  = Dialog.getNumber();
+            blueOnly = Dialog.getNumber();
+            redBlue  = Dialog.getNumber();
+            adjacent = Dialog.getNumber();
+            notes    = Dialog.getString();
+
+            // Record results
+            setResult("Image",               resultRow, imgTitle);
+            setResult("Cell #",              resultRow, cellNum);
+            setResult("X (px)",              resultRow, cx);
+            setResult("Y (px)",              resultRow, cy);
+            setResult("Red Only",            resultRow, redOnly);
+            setResult("Blue Only",           resultRow, blueOnly);
+            setResult("Red + Blue",          resultRow, redBlue);
+            setResult("Total Intracellular", resultRow, redOnly + blueOnly + redBlue);
+            setResult("Adjacent",            resultRow, adjacent);
+            setResult("Notes",               resultRow, notes);
+            resultRow++;
+        }
+
+        // Close channel duplicates and merged projection for this image
+        for (c = 0; c < channels; c++) {
+            if (isOpen(channelIDs[c])) {
+                selectImage(channelIDs[c]);
+                close();
+            }
+        }
+        if (isOpen(mergedID)) { selectImage(mergedID); close(); }
+
+        print("Done: " + imgTitle + " (" + nCells + " cells)");
+    }
+
+    // ── Save CSV ──────────────────────────────────────────────
+    updateResults();
+
+    csvName  = getString("Name for the CSV file:", "bacteria_counts");
+    saveDir  = getDirectory("Choose save location");
+    savePath = saveDir + csvName + ".csv";
+    saveAs("Results", savePath);
+
+    IJ.renameResults("Bacteria Counts");
+
+    showMessage("Done!",
+        "Processed " + nOrig + " images.\n \n" +
+        "Saved to:\n" + savePath);
+}
