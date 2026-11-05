@@ -1,5 +1,5 @@
 // Split and Merge Channels - All Open Images (3-channel)
-// Choose a color for each channel once per run
+// Channel order is preserved; colors are applied as LUTs after merging
 
 colors = newArray("Red", "Green", "Blue", "Gray", "Cyan", "Magenta", "Yellow");
 Dialog.create("Channel colors");
@@ -46,21 +46,19 @@ if (titles.length == 0) {
 
         print("Merging c1=" + ct[0] + "  c2=" + ct[1] + "  c3=" + ct[2]);
 
-        // Chosen colors get their channel, all other slots are *None*
-        slots = newArray("*None*", "*None*", "*None*", "*None*", "*None*", "*None*", "*None*");
-        for (c = 0; c < 3; c++) slots[slotOf(col[c], colors)] = "[" + ct[c] + "]";
-
-        opts = "";
-        for (s = 0; s < 7; s++) opts = opts + "c" + (s + 1) + "=" + slots[s] + " ";
-        run("Merge Channels...", opts + "create");
-
+        // Merge in original order (slots 1-3), then recolor each channel below
+        run("Merge Channels...", "c1=[" + ct[0] + "] c2=[" + ct[1] + "] c3=[" + ct[2] + "] create");
         rename(title + "_merged");
+
+        for (c = 1; c <= 3; c++) {
+            Stack.setChannel(c);
+            run(lutName(col[c - 1]));
+        }
+        Stack.setChannel(1);
     }
 }
 
-function slotOf(name, list) {
-    for (k = 0; k < list.length; k++) {
-        if (list[k] == name) return k;
-    }
-    return -1;
+function lutName(name) {
+    if (name == "Gray") return "Grays";
+    return name;
 }
