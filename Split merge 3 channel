@@ -1,0 +1,66 @@
+// Split and Merge Channels - All Open Images (3-channel)
+// Choose a color for each channel once per run
+
+colors = newArray("Red", "Green", "Blue", "Gray", "Cyan", "Magenta", "Yellow");
+Dialog.create("Channel colors");
+Dialog.addChoice("Channel 1", colors, "Blue");
+Dialog.addChoice("Channel 2", colors, "Green");
+Dialog.addChoice("Channel 3", colors, "Red");
+Dialog.show();
+col = newArray(3);
+col[0] = Dialog.getChoice();
+col[1] = Dialog.getChoice();
+col[2] = Dialog.getChoice();
+if (col[0] == col[1] || col[0] == col[2] || col[1] == col[2]) exit("Pick three different colors");
+
+titles = getList("image.titles");
+
+if (titles.length == 0) {
+    showMessage("No images open");
+} else {
+    for (i = 0; i < titles.length; i++) {
+        title = titles[i];
+
+        if (!isOpen(title)) continue;
+
+        selectWindow(title);
+
+        getDimensions(w, h, channels, slices, frames);
+        if (channels != 3) {
+            print("Skipping " + title + " - has " + channels + " channel(s), not 3");
+            continue;
+        }
+
+        run("Split Channels");
+
+        // The 3 split windows are the last 3 open images; match them by C1-/C2-/C3- prefix
+        n = nImages;
+        ct = newArray(3);
+        for (j = n - 2; j <= n; j++) {
+            selectImage(j);
+            t = getTitle();
+            if (startsWith(t, "C1-")) ct[0] = t;
+            else if (startsWith(t, "C2-")) ct[1] = t;
+            else if (startsWith(t, "C3-")) ct[2] = t;
+        }
+
+        print("Merging c1=" + ct[0] + "  c2=" + ct[1] + "  c3=" + ct[2]);
+
+        // Chosen colors get their channel, all other slots are *None*
+        slots = newArray("*None*", "*None*", "*None*", "*None*", "*None*", "*None*", "*None*");
+        for (c = 0; c < 3; c++) slots[slotOf(col[c], colors)] = "[" + ct[c] + "]";
+
+        opts = "";
+        for (s = 0; s < 7; s++) opts = opts + "c" + (s + 1) + "=" + slots[s] + " ";
+        run("Merge Channels...", opts + "create");
+
+        rename(title + "_merged");
+    }
+}
+
+function slotOf(name, list) {
+    for (k = 0; k < list.length; k++) {
+        if (list[k] == name) return k;
+    }
+    return -1;
+}
